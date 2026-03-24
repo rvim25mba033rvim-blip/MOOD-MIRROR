@@ -5,6 +5,7 @@ import {
   Calendar as CalendarIcon, ChevronLeft, ChevronRight, Clock, Moon, Star, Share2, LogOut, Cloud, Loader2, AlertCircle,
   Gamepad2, Trophy, X, Zap, Target, Heart, Wand2, HelpCircle, Bell
 } from 'lucide-react';
+import { SpeedInsights } from '@vercel/speed-insights/react';
 
 // Firebase Imports
 import { initializeApp } from 'firebase/app';
@@ -475,6 +476,7 @@ export default function App() {
         }
         .animate-blob-slow { animation: blob-slow 20s infinite linear; }
       `}} />
+      <SpeedInsights />
     </div>
   );
 }
