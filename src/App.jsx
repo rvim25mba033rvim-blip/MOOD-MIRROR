@@ -179,10 +179,16 @@ export default function App() {
   const [otpFlow, setOtpFlow] = useState('signin');
   const [isAuthLoading, setIsAuthLoading] = useState(false);
   const [isUnlinkingProvider, setIsUnlinkingProvider] = useState(null);
+  const [trailParticles, setTrailParticles] = useState([]);
+  const [isRitualActive, setIsRitualActive] = useState(false);
+  const [ritualTimeLeft, setRitualTimeLeft] = useState(30);
+  const [ritualPhase, setRitualPhase] = useState('Inhale');
+  const [isDraggingBlob, setIsDraggingBlob] = useState(false);
   const lastHapticAt = useRef(0);
+  const lastTrailAt = useRef(0);
   const audioContextRef = useRef(null);
 
-  const constraintsRef = useRef(null);
+  const blobAreaRef = useRef(null);
   const activeTheme = MOOD_THEMES[currentMood];
   const resilienceBoost = Math.min((gameStats.dissolveScore || 0) / 150, 0.18);
   const blobProfile = useMemo(() => {
@@ -194,6 +200,14 @@ export default function App() {
       damping: Math.max(base.damping - Math.round(resilienceBoost * 10), 16),
     };
   }, [currentMood, resilienceBoost]);
+
+  const pulseProfile = useMemo(() => {
+    if (currentMood === 'stress') return { duration: 0.95, scaleMin: 0.96, scaleMax: 1.03 };
+    if (currentMood === 'anxiety') return { duration: 1.15, scaleMin: 0.97, scaleMax: 1.04 };
+    if (currentMood === 'low') return { duration: 1.6, scaleMin: 0.95, scaleMax: 1.01 };
+    if (currentMood === 'joy') return { duration: 1.1, scaleMin: 0.98, scaleMax: 1.08 };
+    return { duration: 1.35, scaleMin: 0.97, scaleMax: 1.05 };
+  }, [currentMood]);
 
   const triggerHaptic = useCallback((pattern = [10], minIntervalMs = 60) => {
     if (typeof window === 'undefined') return;
@@ -231,6 +245,33 @@ export default function App() {
       osc.stop(now + 0.14);
     } catch (_) {}
   }, [blobProfile]);
+
+  const spawnTrailParticle = useCallback((clientX, clientY) => {
+    if (!blobAreaRef.current) return;
+    const now = Date.now();
+    if (now - lastTrailAt.current < 40) return;
+    lastTrailAt.current = now;
+
+    const rect = blobAreaRef.current.getBoundingClientRect();
+    const id = `${now}-${Math.random()}`;
+    const next = {
+      id,
+      x: clientX - rect.left,
+      y: clientY - rect.top,
+      size: 8 + Math.random() * 10,
+      color: activeTheme.solid
+    };
+    setTrailParticles((prev) => [...prev.slice(-20), next]);
+    setTimeout(() => {
+      setTrailParticles((prev) => prev.filter((item) => item.id !== id));
+    }, 850);
+  }, [activeTheme.solid]);
+
+  const handleMoodSelect = useCallback((nextMood) => {
+    setCurrentMood(nextMood);
+    triggerHaptic([6, 30, 10], 0);
+    playTextureTone(true);
+  }, [triggerHaptic, playTextureTone]);
 
   // Motion Values
   const x = useMotionValue(0);
@@ -504,6 +545,20 @@ export default function App() {
     }
   }, [linkedProviders.length, isProviderLinked]);
 
+  const startRitual = useCallback(() => {
+    setRitualTimeLeft(30);
+    setRitualPhase('Inhale');
+    setIsRitualActive(true);
+    triggerHaptic([10, 40, 12], 0);
+    playTextureTone(false);
+  }, [triggerHaptic, playTextureTone]);
+
+  const stopRitual = useCallback(() => {
+    setIsRitualActive(false);
+    setRitualTimeLeft(30);
+    setRitualPhase('Inhale');
+  }, []);
+
   useEffect(() => {
     if (!user || !db) return;
     const colRef = collection(db, 'artifacts', appId, 'users', user.uid, 'days');
@@ -534,6 +589,36 @@ export default function App() {
     window.addEventListener('keydown', onEscClose);
     return () => window.removeEventListener('keydown', onEscClose);
   }, [isAuthModalOpen, isCalendarOpen, isGamesOpen]);
+
+  useEffect(() => {
+    if (!isRitualActive) return;
+    const timer = setInterval(() => {
+      setRitualTimeLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          setIsRitualActive(false);
+          triggerHaptic([20, 80, 20], 0);
+          playTextureTone(true);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [isRitualActive, triggerHaptic, playTextureTone]);
+
+  useEffect(() => {
+    if (!isRitualActive) return;
+    const elapsed = 30 - ritualTimeLeft;
+    const nextPhase = elapsed % 10 < 5 ? 'Inhale' : 'Exhale';
+    setRitualPhase(nextPhase);
+  }, [isRitualActive, ritualTimeLeft]);
+
+  useEffect(() => {
+    if (!isRitualActive) return;
+    triggerHaptic(ritualPhase === 'Inhale' ? [8] : [14], 0);
+    playTextureTone(ritualPhase === 'Exhale');
+  }, [isRitualActive, ritualPhase, triggerHaptic, playTextureTone]);
 
   const handleSlotClick = useCallback(async (slotId) => {
     const dateKey = getDateKey(selectedDate);
@@ -945,30 +1030,73 @@ export default function App() {
         <AnimatePresence mode="wait">
           {view === 'checkin' ? (
             <motion.div key="checkin" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="flex flex-col gap-6 md:gap-8 pb-12 text-slate-800">
-              <div ref={constraintsRef} className="z-10 relative backdrop-blur-3xl bg-white/30 p-6 md:p-10 rounded-[2.5rem] md:rounded-[4rem] border border-white/40 shadow-xl flex flex-col items-center gap-8 md:gap-12 min-h-[400px] md:min-h-[500px] overflow-hidden text-slate-800">
+              <div className="z-10 relative backdrop-blur-3xl bg-white/30 p-6 md:p-10 rounded-[2.5rem] md:rounded-[4rem] border border-white/40 shadow-xl flex flex-col items-center gap-8 md:gap-12 min-h-[500px] md:min-h-[620px] overflow-hidden text-slate-800">
                 <div className="text-center z-20">
                   <h2 className="text-lg md:text-2xl font-bold uppercase tracking-widest opacity-80" style={{ fontFamily: "'Cinzel Decorative', serif" }}>Fluid Release</h2>
                   <p className="text-xs md:text-sm italic opacity-60">Physically release tension. Tap palette to log vibe.</p>
                   <p className="text-[10px] md:text-xs mt-2 uppercase tracking-widest text-slate-500">{blobProfile.label} • tuned for your current rhythm</p>
                 </div>
-                <div className="relative flex-1 flex items-center justify-center w-full min-h-[200px] pointer-events-none">
+                <div ref={blobAreaRef} className="relative flex-1 flex items-center justify-center w-full min-h-[260px] md:min-h-[340px] pointer-events-none">
+                  {trailParticles.map((particle) => (
+                    <motion.div
+                      key={particle.id}
+                      initial={{ opacity: 0.7, scale: 0.4 }}
+                      animate={{ opacity: 0, scale: 2.8, y: -24 }}
+                      transition={{ duration: 0.8, ease: 'easeOut' }}
+                      className="absolute rounded-full blur-md pointer-events-none"
+                      style={{
+                        left: particle.x,
+                        top: particle.y,
+                        width: particle.size,
+                        height: particle.size,
+                        backgroundColor: particle.color
+                      }}
+                    />
+                  ))}
+
                   <motion.div
                     drag
-                    dragConstraints={constraintsRef}
+                    dragConstraints={blobAreaRef}
                     dragElastic={blobProfile.dragElastic}
                     style={{ x, y, rotateX, rotateY }}
+                    animate={{ scale: [pulseProfile.scaleMin, pulseProfile.scaleMax, pulseProfile.scaleMin] }}
+                    transition={{ duration: pulseProfile.duration, repeat: Infinity, ease: 'easeInOut' }}
                     onPointerDown={() => { triggerHaptic([8], 0); playTextureTone(false); }}
-                    onDragStart={() => { triggerHaptic([10], 40); playTextureTone(false); }}
-                    onDragEnd={() => { x.set(0); y.set(0); triggerHaptic([16]); playTextureTone(true); }}
+                    onPointerMove={(event) => { if (isDraggingBlob) spawnTrailParticle(event.clientX, event.clientY); }}
+                    onDragStart={() => { setIsDraggingBlob(true); triggerHaptic([10], 40); playTextureTone(false); }}
+                    onDragEnd={() => { setIsDraggingBlob(false); x.set(0); y.set(0); triggerHaptic([16]); playTextureTone(true); }}
                     whileTap={{ scale: 0.97 }}
                     className={`pointer-events-auto z-30 w-36 h-36 md:w-56 md:h-56 shadow-2xl backdrop-blur-3xl transition-colors duration-1000 ${activeTheme.glass} ${activeTheme.glow} border border-white/60 flex items-center justify-center cursor-grab active:cursor-grabbing rounded-full p-8`}
                   >
                     <div className={`${activeTheme.accent} w-full h-full`}>{React.cloneElement(activeTheme.icon, { size: '100%' })}</div>
                   </motion.div>
                 </div>
+
+                <div className="w-full max-w-md z-20 flex flex-col items-center gap-3">
+                  <button
+                    onClick={() => (isRitualActive ? stopRitual() : startRitual())}
+                    className="px-6 py-2.5 rounded-full bg-slate-900 text-white text-[10px] font-black uppercase tracking-[0.2em] shadow-lg hover:scale-105 active:scale-95 transition-transform"
+                  >
+                    {isRitualActive ? 'Stop 30s Ritual' : 'Start 30s Ritual'}
+                  </button>
+                  {isRitualActive && (
+                    <div className="w-full rounded-[1.6rem] bg-white/65 border border-white/90 p-3 flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-[10px] uppercase tracking-widest font-black text-slate-500">Guided Ritual</p>
+                        <p className="text-sm font-bold text-slate-700">{ritualPhase} • {ritualTimeLeft}s</p>
+                      </div>
+                      <motion.div
+                        animate={{ scale: ritualPhase === 'Inhale' ? [0.9, 1.15] : [1.15, 0.88] }}
+                        transition={{ duration: ritualPhase === 'Inhale' ? 5 : 5, ease: 'easeInOut', repeat: Infinity }}
+                        className="w-12 h-12 rounded-full"
+                        style={{ background: `radial-gradient(circle at 30% 30%, #ffffff, ${activeTheme.solid})` }}
+                      />
+                    </div>
+                  )}
+                </div>
                 <div className="grid grid-cols-5 gap-3 md:gap-6 w-full max-w-lg z-20">
                   {Object.entries(MOOD_THEMES).map(([key, theme]) => (
-                    <button key={key} onClick={() => setCurrentMood(key)} className={`group flex flex-col items-center gap-3 transition-all ${currentMood === key ? 'scale-110' : 'opacity-40 hover:opacity-100'}`}>
+                    <button key={key} onClick={() => handleMoodSelect(key)} className={`group flex flex-col items-center gap-3 transition-all ${currentMood === key ? 'scale-110' : 'opacity-40 hover:opacity-100'}`}>
                       <div className={`w-10 h-10 md:w-12 md:h-12 rounded-full border-2 border-white flex items-center justify-center p-2.5 shadow-lg`} style={{ backgroundColor: theme.solid }}>
                         <div className="text-white w-full h-full">{React.cloneElement(theme.icon, { size: 18 })}</div>
                       </div>
