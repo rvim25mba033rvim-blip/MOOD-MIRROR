@@ -9,8 +9,37 @@ import { SpeedInsights } from '@vercel/speed-insights/react';
 
 // Firebase Imports
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut } from 'firebase/auth';
-import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, query, limit, orderBy } from 'firebase/firestore';
+import {
+  getAuth,
+  signInWithCustomToken,
+  onAuthStateChanged,
+  signOut,
+  GoogleAuthProvider,
+  signInWithPopup,
+  linkWithPopup,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  linkWithCredential,
+  EmailAuthProvider,
+  PhoneAuthProvider,
+  RecaptchaVerifier,
+  signInWithPhoneNumber,
+  unlink
+} from 'firebase/auth';
+import {
+  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  doc,
+  setDoc,
+  getDoc,
+  collection,
+  onSnapshot,
+  query,
+  limit,
+  orderBy
+} from 'firebase/firestore';
 
 // --- ROBUST CONFIGURATION LOGIC ---
 const parseFirebaseConfig = (rawValue) => {
@@ -71,7 +100,13 @@ if (config && config.apiKey) {
   try {
     const app = initializeApp(config);
     auth = getAuth(app);
-    db = getFirestore(app);
+    try {
+      db = initializeFirestore(app, {
+        localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+      });
+    } catch (_) {
+      db = getFirestore(app);
+    }
   } catch (e) {
     console.error("Firebase Init Error:", e);
   }
@@ -95,6 +130,8 @@ const TIME_SLOTS = [
 
 const OVERLAY_BACK_LABEL = 'Back To Mood Mirror';
 const OVERLAY_BACK_BUTTON_CLASS = 'fixed bottom-4 left-1/2 -translate-x-1/2 z-[320] px-6 py-3 rounded-full bg-slate-900 text-white text-[10px] md:text-xs font-black uppercase tracking-[0.2em] shadow-2xl border border-white/20 transition-all duration-300 hover:scale-[1.03] active:scale-95';
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const OTP_REGEX = /^\d{6}$/;
 
 const MOOD_SCORE = { stress: 1, anxiety: 2, low: 3, calm: 4, joy: 5 };
 
@@ -131,6 +168,17 @@ export default function App() {
   const [gameStats, setGameStats] = useState({ dissolveScore: 0 });
   const [weeklyAlert, setWeeklyAlert] = useState(null);
   const [interventionProgress, setInterventionProgress] = useState({ beforeMood: null, afterMood: null, lastDelta: null });
+  const [authMode, setAuthMode] = useState('email');
+  const [authModalPurpose, setAuthModalPurpose] = useState('signin');
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [phoneNumber, setPhoneNumber] = useState('');
+  const [otpCode, setOtpCode] = useState('');
+  const [otpSession, setOtpSession] = useState(null);
+  const [otpFlow, setOtpFlow] = useState('signin');
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
+  const [isUnlinkingProvider, setIsUnlinkingProvider] = useState(null);
   const lastHapticAt = useRef(0);
   const audioContextRef = useRef(null);
 
@@ -238,18 +286,223 @@ export default function App() {
       try {
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
           await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
         }
         setAuthError(null);
       } catch (err) { 
         setAuthError(err.message);
-        setTimeout(initAuth, 5000); 
       }
     };
     initAuth();
-    return onAuthStateChanged(auth, setUser);
+    return onAuthStateChanged(auth, (nextUser) => {
+      setUser(nextUser);
+      if (nextUser) {
+        setAuthError(null);
+        setOtpSession(null);
+        setOtpCode('');
+        setIsAuthModalOpen(false);
+      }
+    });
   }, []);
+
+  const validatePassword = useCallback((value) => {
+    const checks = [
+      value.length >= 8,
+      /[A-Z]/.test(value),
+      /[a-z]/.test(value),
+      /\d/.test(value),
+    ];
+    return checks.every(Boolean);
+  }, []);
+
+  const openAuthModal = useCallback((purpose) => {
+    setAuthModalPurpose(purpose);
+    setAuthError(null);
+    setOtpSession(null);
+    setOtpCode('');
+    setIsAuthModalOpen(true);
+  }, []);
+
+  const isProviderLinked = useCallback((providerId) => {
+    if (!user?.providerData) return false;
+    return user.providerData.some((item) => item.providerId === providerId);
+  }, [user]);
+
+  const linkedProviders = useMemo(() => {
+    if (!user?.providerData) return [];
+    return user.providerData
+      .map((provider) => provider.providerId)
+      .filter(Boolean);
+  }, [user]);
+
+  const providerLabel = useCallback((providerId) => {
+    if (providerId === 'google.com') return 'Google';
+    if (providerId === 'password') return 'Email';
+    if (providerId === 'phone') return 'Phone OTP';
+    return providerId;
+  }, []);
+
+  const ensurePhoneFormat = useCallback((value) => {
+    const clean = value.replace(/[^\d+]/g, '');
+    if (clean.startsWith('+')) return clean;
+    return `+91${clean}`;
+  }, []);
+
+  const validateIndianPhone = useCallback((value) => {
+    const formatted = ensurePhoneFormat(value);
+    return /^\+91[6-9]\d{9}$/.test(formatted);
+  }, [ensurePhoneFormat]);
+
+  const ensureRecaptcha = useCallback(() => {
+    if (!auth || typeof window === 'undefined') return null;
+    if (!window.recaptchaVerifier) {
+      window.recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+        size: 'invisible'
+      });
+    }
+    return window.recaptchaVerifier;
+  }, []);
+
+  const handleGoogleLogin = useCallback(async () => {
+    if (!auth) return;
+    setIsAuthLoading(true);
+    try {
+      const provider = new GoogleAuthProvider();
+      if (authModalPurpose === 'link' && user) {
+        if (isProviderLinked('google.com')) {
+          setAuthError('Google is already linked to this account.');
+          return;
+        }
+        await linkWithPopup(user, provider);
+      } else {
+        await signInWithPopup(auth, provider);
+      }
+      setAuthError(null);
+    } catch (err) {
+      setAuthError(err.message || 'Google sign-in failed.');
+    } finally {
+      setIsAuthLoading(false);
+    }
+  }, [authModalPurpose, user, isProviderLinked]);
+
+  const handleEmailLogin = useCallback(async (isSignUp) => {
+    if (!auth || !email || !password) {
+      setAuthError('Enter email and password.');
+      return;
+    }
+    if (!EMAIL_REGEX.test(email.trim())) {
+      setAuthError('Enter a valid email address.');
+      return;
+    }
+    if ((isSignUp || authModalPurpose === 'link') && !validatePassword(password)) {
+      setAuthError('Use 8+ chars with upper, lower, and number.');
+      return;
+    }
+
+    setIsAuthLoading(true);
+    try {
+      if (authModalPurpose === 'link' && user) {
+        if (isProviderLinked('password')) {
+          setAuthError('Email/password is already linked to this account.');
+          return;
+        }
+        const credential = EmailAuthProvider.credential(email.trim(), password);
+        await linkWithCredential(user, credential);
+      } else if (isSignUp) {
+        await createUserWithEmailAndPassword(auth, email.trim(), password);
+      } else {
+        await signInWithEmailAndPassword(auth, email.trim(), password);
+      }
+      setAuthError(null);
+    } catch (err) {
+      setAuthError(err.message || 'Email sign-in failed.');
+    } finally {
+      setIsAuthLoading(false);
+    }
+  }, [email, password, authModalPurpose, user, validatePassword, isProviderLinked]);
+
+  const handleSendOtp = useCallback(async () => {
+    if (!auth || !phoneNumber) {
+      setAuthError('Enter mobile number first.');
+      return;
+    }
+    if (!validateIndianPhone(phoneNumber)) {
+      setAuthError('Enter a valid Indian mobile number.');
+      return;
+    }
+    setIsAuthLoading(true);
+    try {
+      const verifier = ensureRecaptcha();
+      const session = await signInWithPhoneNumber(auth, ensurePhoneFormat(phoneNumber), verifier);
+      setOtpSession(session);
+      setOtpFlow(authModalPurpose);
+      setAuthError(null);
+    } catch (err) {
+      setAuthError(err.message || 'OTP send failed.');
+    } finally {
+      setIsAuthLoading(false);
+    }
+  }, [phoneNumber, validateIndianPhone, ensurePhoneFormat, ensureRecaptcha, authModalPurpose]);
+
+  const handleVerifyOtp = useCallback(async () => {
+    if (!otpSession || !otpCode) {
+      setAuthError('Enter OTP code.');
+      return;
+    }
+    if (!OTP_REGEX.test(otpCode)) {
+      setAuthError('Enter valid 6-digit OTP.');
+      return;
+    }
+    setIsAuthLoading(true);
+    try {
+      if (otpFlow === 'link' && user) {
+        if (isProviderLinked('phone')) {
+          setAuthError('Phone number is already linked to this account.');
+          return;
+        }
+        const verificationId = otpSession.verificationId;
+        const credential = PhoneAuthProvider.credential(verificationId, otpCode);
+        await linkWithCredential(user, credential);
+      } else {
+        await otpSession.confirm(otpCode);
+      }
+      setAuthError(null);
+    } catch (err) {
+      setAuthError(err.message || 'OTP verification failed.');
+    } finally {
+      setIsAuthLoading(false);
+    }
+  }, [otpSession, otpCode, otpFlow, user, isProviderLinked]);
+
+  const handleLogout = useCallback(async () => {
+    if (!auth) return;
+    try {
+      await signOut(auth);
+    } catch (err) {
+      setAuthError(err.message || 'Sign out failed.');
+    }
+  }, []);
+
+  const handleUnlinkProvider = useCallback(async (providerId) => {
+    if (!auth?.currentUser) return;
+    if (!isProviderLinked(providerId)) {
+      setAuthError('Provider is not linked.');
+      return;
+    }
+    if (linkedProviders.length <= 1) {
+      setAuthError('Cannot unlink your last sign-in method. Link another method first.');
+      return;
+    }
+
+    setIsUnlinkingProvider(providerId);
+    try {
+      await unlink(auth.currentUser, providerId);
+      setAuthError(null);
+    } catch (err) {
+      setAuthError(err.message || 'Failed to unlink sign-in method.');
+    } finally {
+      setIsUnlinkingProvider(null);
+    }
+  }, [linkedProviders.length, isProviderLinked]);
 
   useEffect(() => {
     if (!user || !db) return;
@@ -271,6 +524,7 @@ export default function App() {
   useEffect(() => {
     const onEscClose = (event) => {
       if (event.key !== 'Escape') return;
+      if (isAuthModalOpen) setIsAuthModalOpen(false);
       if (isCalendarOpen) setIsCalendarOpen(false);
       if (isGamesOpen) {
         setIsGamesOpen(false);
@@ -279,7 +533,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onEscClose);
     return () => window.removeEventListener('keydown', onEscClose);
-  }, [isCalendarOpen, isGamesOpen]);
+  }, [isAuthModalOpen, isCalendarOpen, isGamesOpen]);
 
   const handleSlotClick = useCallback(async (slotId) => {
     const dateKey = getDateKey(selectedDate);
@@ -512,19 +766,11 @@ export default function App() {
     <div className={`min-h-screen w-full transition-colors duration-1000 bg-gradient-to-br ${activeTheme.bg} p-4 md:p-8 flex flex-col items-center overflow-x-hidden font-sans`}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@400;700;900&display=swap');`}</style>
       
-      {/* Top Right: Horizon Calendar Trigger */}
-      <button 
-        onClick={() => { setIsCalendarOpen(true); generateWeeklyInsight(); }}
-        className="fixed top-6 right-6 z-[100] p-4 rounded-full backdrop-blur-xl bg-white/30 border border-white/40 shadow-lg text-slate-800 hover:scale-110 active:scale-95 transition-all"
-      >
-        <CalendarIcon size={24} />
-      </button>
-
       {/* Sync Status Badge */}
       <div className="fixed bottom-4 left-4 z-[100] group text-slate-800">
         <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full backdrop-blur-md border text-[9px] font-black uppercase tracking-widest transition-all ${user ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600' : 'bg-rose-500/10 border-rose-500/30 text-rose-500'}`}>
           <Cloud size={12} className={!user ? 'animate-pulse' : ''} />
-          {user ? 'Cloud Synced' : authError ? 'Config Error' : 'Syncing...'}
+          {user ? 'Cloud Synced' : authError ? 'Auth Issue' : 'Sign In Required'}
         </div>
       </div>
 
@@ -533,11 +779,167 @@ export default function App() {
           <h1 className="text-2xl md:text-4xl font-black uppercase tracking-widest text-slate-800" style={{ fontFamily: "'Cinzel Decorative', serif" }}>Mood Mirror</h1>
           <div className="h-1 w-16 md:w-24 bg-slate-800 rounded-full mt-1 opacity-20 hidden md:block" />
         </div>
-        <nav className="flex gap-2 backdrop-blur-xl bg-white/20 p-1.5 rounded-full border border-white/30 shadow-sm">
-          <button onClick={() => setView('checkin')} className={`px-5 md:px-7 py-2.5 rounded-full transition-all text-[10px] font-black uppercase tracking-widest ${view === 'checkin' ? 'bg-white shadow-md text-slate-900' : 'text-slate-500 hover:bg-white/30'}`}>Reflect</button>
-          <button onClick={() => setView('dashboard')} className={`px-5 md:px-7 py-2.5 rounded-full transition-all text-[10px] font-black uppercase tracking-widest ${view === 'dashboard' ? 'bg-white shadow-md text-slate-900' : 'text-slate-500 hover:bg-white/30'}`}>Insights</button>
-        </nav>
+        <div className="w-full md:w-auto flex flex-col sm:flex-row items-center justify-center md:justify-end gap-2">
+          <nav className="flex gap-2 backdrop-blur-xl bg-white/20 p-1.5 rounded-full border border-white/30 shadow-sm">
+            <button onClick={() => setView('checkin')} className={`px-5 md:px-7 py-2.5 rounded-full transition-all text-[10px] font-black uppercase tracking-widest ${view === 'checkin' ? 'bg-white shadow-md text-slate-900' : 'text-slate-500 hover:bg-white/30'}`}>Reflect</button>
+            <button onClick={() => setView('dashboard')} className={`px-5 md:px-7 py-2.5 rounded-full transition-all text-[10px] font-black uppercase tracking-widest ${view === 'dashboard' ? 'bg-white shadow-md text-slate-900' : 'text-slate-500 hover:bg-white/30'}`}>Insights</button>
+          </nav>
+          <button
+            onClick={() => { setIsCalendarOpen(true); generateWeeklyInsight(); }}
+            className="px-4 py-2 rounded-full bg-white/70 border border-white/80 text-[10px] font-black uppercase tracking-widest text-slate-700 hover:bg-white transition-colors flex items-center gap-2"
+          >
+            <CalendarIcon size={13} />
+            Calendar
+          </button>
+
+          <div className="flex items-center gap-2">
+          {!user && (
+            <button
+              onClick={() => openAuthModal('signin')}
+              className="px-4 py-2 rounded-full bg-slate-800 text-white border border-slate-700 text-[10px] font-black uppercase tracking-widest hover:bg-slate-700 transition-colors"
+            >
+              Sign In
+            </button>
+          )}
+          {user && (
+            <>
+              <button
+                onClick={() => openAuthModal('link')}
+                className="px-4 py-2 rounded-full bg-white/60 border border-white/80 text-[10px] font-black uppercase tracking-widest text-slate-700 hover:bg-white transition-colors"
+              >
+                Link Accounts
+              </button>
+              <button
+                onClick={handleLogout}
+                className="px-4 py-2 rounded-full bg-white/60 border border-white/80 text-[10px] font-black uppercase tracking-widest text-slate-700 hover:bg-white transition-colors flex items-center gap-2"
+              >
+                <LogOut size={12} />
+                Log Out
+              </button>
+            </>
+          )}
+          </div>
+        </div>
       </header>
+
+      {user && (
+        <div className="w-full max-w-5xl mb-6 backdrop-blur-xl bg-white/40 border border-white/60 rounded-[2rem] p-4 md:p-5 shadow-lg text-slate-800">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <div>
+              <h3 className="text-xs md:text-sm font-black uppercase tracking-widest" style={{ fontFamily: "'Cinzel Decorative', serif" }}>Account Settings</h3>
+              <p className="text-[11px] text-slate-600 italic mt-1">Linked sign-in methods. Unlink is blocked if only one method remains.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {linkedProviders.length === 0 && (
+                <span className="px-3 py-1.5 rounded-full bg-slate-100 text-[10px] font-black uppercase tracking-widest text-slate-500">No linked methods</span>
+              )}
+              {linkedProviders.map((providerId) => (
+                <div key={providerId} className="flex items-center gap-1.5 rounded-full bg-white/80 border border-slate-200 px-2 py-1">
+                  <span className="px-2 py-1 rounded-full bg-slate-800 text-white text-[9px] font-black uppercase tracking-widest">{providerLabel(providerId)}</span>
+                  <button
+                    onClick={() => handleUnlinkProvider(providerId)}
+                    disabled={isUnlinkingProvider === providerId || linkedProviders.length <= 1}
+                    className="px-2.5 py-1 rounded-full bg-rose-50 border border-rose-200 text-rose-700 text-[9px] font-black uppercase tracking-widest disabled:opacity-40"
+                  >
+                    {isUnlinkingProvider === providerId ? '...' : 'Unlink'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div id="recaptcha-container" className="hidden" />
+
+      <AnimatePresence>
+        {isAuthModalOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setIsAuthModalOpen(false)}
+            className="fixed inset-0 z-[400] bg-slate-900/65 backdrop-blur-md p-4 flex items-center justify-center"
+          >
+            <motion.div
+              initial={{ opacity: 0, y: 20, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 14, scale: 0.98 }}
+              transition={{ duration: 0.2 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-md rounded-[2rem] border border-white/30 bg-white/90 backdrop-blur-xl shadow-2xl p-5 md:p-6 text-slate-800"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-sm md:text-base font-black uppercase tracking-widest" style={{ fontFamily: "'Cinzel Decorative', serif" }}>
+                    {authModalPurpose === 'link' ? 'Link Sign-In Methods' : 'Sign In To Sync'}
+                  </h3>
+                  <p className="text-xs text-slate-600 mt-1 italic">
+                    {authModalPurpose === 'link' ? 'Attach Google, email, and phone to one account.' : 'Your mood history syncs across devices, even after reinstall.'}
+                  </p>
+                </div>
+                <button onClick={() => setIsAuthModalOpen(false)} className="p-2 rounded-full bg-slate-100 hover:bg-slate-200 transition-colors" aria-label="Close auth modal"><X size={18} /></button>
+              </div>
+
+              {authModalPurpose === 'link' && user?.providerData?.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {user.providerData.map((provider) => (
+                    <span key={provider.providerId} className="px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-widest bg-slate-800 text-white">
+                      {provider.providerId.replace('.com', '').replace('password', 'email')}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <div className="mt-4 grid grid-cols-2 gap-2 bg-white/70 p-1 rounded-full border border-slate-200">
+                <button onClick={() => setAuthMode('email')} className={`px-3 py-2 rounded-full text-[10px] font-black uppercase tracking-widest ${authMode === 'email' ? 'bg-slate-800 text-white' : 'text-slate-600'}`}>Email</button>
+                <button onClick={() => setAuthMode('phone')} className={`px-3 py-2 rounded-full text-[10px] font-black uppercase tracking-widest ${authMode === 'phone' ? 'bg-slate-800 text-white' : 'text-slate-600'}`}>Phone OTP</button>
+              </div>
+
+              <button
+                onClick={handleGoogleLogin}
+                disabled={isAuthLoading || (authModalPurpose === 'link' && isProviderLinked('google.com'))}
+                className="w-full mt-3 py-3 rounded-full bg-white border border-slate-300 text-[10px] font-black uppercase tracking-widest hover:bg-slate-50 disabled:opacity-60 transition-colors"
+              >
+                {authModalPurpose === 'link' ? (isProviderLinked('google.com') ? 'Google Already Linked' : 'Link Google') : 'Continue With Google'}
+              </button>
+
+              {authMode === 'email' ? (
+                <div className="grid grid-cols-1 gap-2 mt-3">
+                  <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" placeholder="Email" className="px-4 py-3 rounded-2xl border border-slate-300 bg-white text-sm outline-none focus:ring-2 focus:ring-slate-300" />
+                  <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="Password" className="px-4 py-3 rounded-2xl border border-slate-300 bg-white text-sm outline-none focus:ring-2 focus:ring-slate-300" />
+                  <p className="text-[10px] text-slate-500">Strong password: 8+ chars, uppercase, lowercase, and number.</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => handleEmailLogin(false)}
+                      disabled={isAuthLoading || (authModalPurpose === 'link' && isProviderLinked('password'))}
+                      className="py-3 rounded-full bg-slate-800 text-white text-[10px] font-black uppercase tracking-widest disabled:opacity-60"
+                    >
+                      {authModalPurpose === 'link' ? 'Link Email' : 'Sign In'}
+                    </button>
+                    <button onClick={() => handleEmailLogin(true)} disabled={isAuthLoading || authModalPurpose === 'link'} className="py-3 rounded-full bg-white border border-slate-300 text-[10px] font-black uppercase tracking-widest disabled:opacity-60">Create</button>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-2 mt-3">
+                  <input value={phoneNumber} onChange={(e) => setPhoneNumber(e.target.value)} type="tel" placeholder="Indian mobile (e.g. 9876543210)" className="px-4 py-3 rounded-2xl border border-slate-300 bg-white text-sm outline-none focus:ring-2 focus:ring-slate-300" />
+                  <div className="grid grid-cols-2 gap-2">
+                    <button onClick={handleSendOtp} disabled={isAuthLoading || (authModalPurpose === 'link' && isProviderLinked('phone'))} className="py-3 rounded-full bg-slate-800 text-white text-[10px] font-black uppercase tracking-widest disabled:opacity-60">
+                      {authModalPurpose === 'link' ? 'Send Link OTP' : 'Send OTP'}
+                    </button>
+                    <input value={otpCode} onChange={(e) => setOtpCode(e.target.value)} type="text" maxLength={6} placeholder="6-digit OTP" className="px-4 py-3 rounded-full border border-slate-300 bg-white text-sm outline-none focus:ring-2 focus:ring-slate-300" />
+                  </div>
+                  <button onClick={handleVerifyOtp} disabled={isAuthLoading || !otpSession} className="py-3 rounded-full bg-white border border-slate-300 text-[10px] font-black uppercase tracking-widest disabled:opacity-60">
+                    {authModalPurpose === 'link' ? 'Verify & Link Phone' : 'Verify OTP'}
+                  </button>
+                </div>
+              )}
+
+              {authError && <p className="mt-3 text-xs text-rose-700 font-bold">{authError}</p>}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <main className="w-full max-w-5xl z-10">
         <AnimatePresence mode="wait">
