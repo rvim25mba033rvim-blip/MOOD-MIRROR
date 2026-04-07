@@ -1030,13 +1030,13 @@ export default function App() {
         <AnimatePresence mode="wait">
           {view === 'checkin' ? (
             <motion.div key="checkin" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="flex flex-col gap-6 md:gap-8 pb-12 text-slate-800">
-              <div className="z-10 relative backdrop-blur-3xl bg-white/30 p-6 md:p-10 rounded-[2.5rem] md:rounded-[4rem] border border-white/40 shadow-xl flex flex-col items-center gap-8 md:gap-12 min-h-[500px] md:min-h-[620px] overflow-hidden text-slate-800">
+              <div ref={blobAreaRef} className="z-10 relative backdrop-blur-3xl bg-white/30 p-6 md:p-10 rounded-[2.5rem] md:rounded-[4rem] border border-white/40 shadow-xl flex flex-col items-center gap-8 md:gap-12 min-h-[560px] md:min-h-[720px] overflow-hidden text-slate-800">
                 <div className="text-center z-20">
                   <h2 className="text-lg md:text-2xl font-bold uppercase tracking-widest opacity-80" style={{ fontFamily: "'Cinzel Decorative', serif" }}>Fluid Release</h2>
                   <p className="text-xs md:text-sm italic opacity-60">Physically release tension. Tap palette to log vibe.</p>
                   <p className="text-[10px] md:text-xs mt-2 uppercase tracking-widest text-slate-500">{blobProfile.label} • tuned for your current rhythm</p>
                 </div>
-                <div ref={blobAreaRef} className="relative flex-1 flex items-center justify-center w-full min-h-[260px] md:min-h-[340px] pointer-events-none">
+                <div className="relative flex-1 flex items-center justify-center w-full min-h-[260px] md:min-h-[340px] pointer-events-none">
                   {trailParticles.map((particle) => (
                     <motion.div
                       key={particle.id}
