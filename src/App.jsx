@@ -93,6 +93,9 @@ const TIME_SLOTS = [
   { id: 'q4', label: '6 PM - 12 AM', period: 'Evening' }
 ];
 
+const OVERLAY_BACK_LABEL = 'Back To Mood Mirror';
+const OVERLAY_BACK_BUTTON_CLASS = 'fixed bottom-4 left-1/2 -translate-x-1/2 z-[320] px-6 py-3 rounded-full bg-slate-900 text-white text-[10px] md:text-xs font-black uppercase tracking-[0.2em] shadow-2xl border border-white/20 transition-all duration-300 hover:scale-[1.03] active:scale-95';
+
 const MOOD_SCORE = { stress: 1, anxiety: 2, low: 3, calm: 4, joy: 5 };
 
 const BLOB_PERSONALITY = {
@@ -264,6 +267,19 @@ export default function App() {
 
     return () => { unsubscribeDays(); unsubscribeStats(); };
   }, [user]);
+
+  useEffect(() => {
+    const onEscClose = (event) => {
+      if (event.key !== 'Escape') return;
+      if (isCalendarOpen) setIsCalendarOpen(false);
+      if (isGamesOpen) {
+        setIsGamesOpen(false);
+        setActiveGame(null);
+      }
+    };
+    window.addEventListener('keydown', onEscClose);
+    return () => window.removeEventListener('keydown', onEscClose);
+  }, [isCalendarOpen, isGamesOpen]);
 
   const handleSlotClick = useCallback(async (slotId) => {
     const dateKey = getDateKey(selectedDate);
@@ -714,11 +730,19 @@ export default function App() {
       {/* CALENDAR OVERLAY */}
       <AnimatePresence>
         {isCalendarOpen && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[200] bg-white/95 backdrop-blur-3xl flex items-center justify-center p-4 md:p-12 overflow-y-auto">
-            <div className="w-full max-w-4xl flex flex-col gap-8 text-slate-800">
-              <div className="flex justify-between items-center">
-                <h2 className="text-2xl md:text-4xl font-black uppercase tracking-[0.3em]" style={{ fontFamily: "'Cinzel Decorative', serif" }}>Mirror Horizon</h2>
-                <button onClick={() => setIsCalendarOpen(false)} className="p-3 bg-slate-100 rounded-full hover:bg-slate-200 transition-colors"><X size={28} /></button>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setIsCalendarOpen(false)}
+            className="fixed inset-0 z-[200] bg-white/95 backdrop-blur-3xl flex items-start justify-center p-3 md:p-8 overflow-y-auto"
+          >
+            <div onClick={(e) => e.stopPropagation()} className="w-full max-w-4xl flex flex-col gap-6 md:gap-8 text-slate-800 pb-28 md:pb-20">
+              <div className="sticky top-0 z-20 bg-white/90 backdrop-blur-xl border border-slate-200 rounded-2xl px-4 py-3 md:px-6 md:py-4 shadow-sm">
+                <div className="flex justify-between items-center gap-3">
+                  <h2 className="text-lg md:text-3xl font-black uppercase tracking-[0.2em] md:tracking-[0.3em]" style={{ fontFamily: "'Cinzel Decorative', serif" }}>Mirror Horizon</h2>
+                  <button onClick={() => setIsCalendarOpen(false)} className="p-3 bg-slate-100 rounded-full hover:bg-slate-200 transition-colors" aria-label="Close calendar and return"><X size={24} /></button>
+                </div>
               </div>
               <div className={`p-8 rounded-[3rem] border transition-all duration-1000 ${weeklyAlert?.alert ? 'bg-rose-500/10 border-rose-500/30' : 'bg-white border-slate-200 shadow-xl'}`}>
                 <div className="flex flex-col md:flex-row gap-6 items-center text-center md:text-left">
@@ -778,6 +802,13 @@ export default function App() {
                 </div>
               </div>
               <p className="text-center text-[10px] font-black text-slate-400 uppercase tracking-[0.4em]">Calculated daily at 01:00 AM • Neural Sync Active</p>
+
+              <button
+                onClick={() => setIsCalendarOpen(false)}
+                className={OVERLAY_BACK_BUTTON_CLASS}
+              >
+                {OVERLAY_BACK_LABEL}
+              </button>
             </div>
           </motion.div>
         )}
@@ -786,14 +817,22 @@ export default function App() {
       {/* ZEN ZONE GAMES OVERLAY */}
       <AnimatePresence>
         {isGamesOpen && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[300] bg-slate-900/98 backdrop-blur-3xl flex items-center justify-center p-4">
-            <div className="w-full max-w-4xl flex flex-col gap-8 text-white max-h-full overflow-y-auto">
-              <div className="flex justify-between items-center">
-                <div className="flex flex-col">
-                  <h2 className="text-3xl md:text-4xl font-black uppercase tracking-widest" style={{ fontFamily: "'Cinzel Decorative', serif" }}>Zen Zone</h2>
-                  <p className="text-[10px] uppercase tracking-widest text-slate-400">Sensory Release & Physics-Based Play</p>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => { setIsGamesOpen(false); setActiveGame(null); }}
+            className="fixed inset-0 z-[300] bg-slate-900/98 backdrop-blur-3xl flex items-start justify-center p-3 md:p-6 overflow-y-auto"
+          >
+            <div onClick={(e) => e.stopPropagation()} className="w-full max-w-4xl flex flex-col gap-6 md:gap-8 text-white max-h-full overflow-y-auto pb-28 md:pb-20">
+              <div className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur-xl border border-white/10 rounded-2xl px-4 py-3 md:px-6 md:py-4 shadow-sm">
+                <div className="flex justify-between items-center gap-3">
+                  <div className="flex flex-col">
+                    <h2 className="text-2xl md:text-4xl font-black uppercase tracking-widest" style={{ fontFamily: "'Cinzel Decorative', serif" }}>Zen Zone</h2>
+                    <p className="text-[10px] uppercase tracking-widest text-slate-400">Sensory Release & Physics-Based Play</p>
+                  </div>
+                  <button onClick={() => { setIsGamesOpen(false); setActiveGame(null); }} className="p-3 bg-white/10 rounded-full hover:bg-white/20 transition-colors" aria-label="Close Zen Zone and return"><X size={24} /></button>
                 </div>
-                <button onClick={() => { setIsGamesOpen(false); setActiveGame(null); }} className="p-3 bg-white/10 rounded-full hover:bg-white/20 transition-colors"><X size={28} /></button>
               </div>
 
               {!activeGame ? (
@@ -813,6 +852,13 @@ export default function App() {
               ) : (
                 <StressBurstGame onFinish={(score) => { saveGameScore('dissolveScore', score); setActiveGame(null); }} />
               )}
+
+              <button
+                onClick={() => { setIsGamesOpen(false); setActiveGame(null); }}
+                className={OVERLAY_BACK_BUTTON_CLASS}
+              >
+                {OVERLAY_BACK_LABEL}
+              </button>
             </div>
           </motion.div>
         )}
