@@ -93,6 +93,25 @@ const TIME_SLOTS = [
   { id: 'q4', label: '6 PM - 12 AM', period: 'Evening' }
 ];
 
+const MOOD_SCORE = { stress: 1, anxiety: 2, low: 3, calm: 4, joy: 5 };
+
+const BLOB_PERSONALITY = {
+  stress: { dragElastic: 0.2, stiffness: 520, damping: 40, tone: 170, label: 'Grounding Mode' },
+  anxiety: { dragElastic: 0.3, stiffness: 460, damping: 34, tone: 220, label: 'Steady Breath Mode' },
+  low: { dragElastic: 0.5, stiffness: 330, damping: 28, tone: 210, label: 'Warm Lift Mode' },
+  calm: { dragElastic: 0.6, stiffness: 300, damping: 24, tone: 300, label: 'Flow Mode' },
+  joy: { dragElastic: 0.72, stiffness: 250, damping: 20, tone: 380, label: 'Playful Mode' },
+};
+
+const INDIA_INTERVENTIONS = [
+  { id: 'box-2', minutes: 2, title: 'Box Breathing', detail: 'Inhale 4, hold 4, exhale 4, hold 4 for 2 minutes.', targets: ['stress', 'anxiety'] },
+  { id: 'water-break-2', minutes: 2, title: 'Hydrate + Reset', detail: 'Drink water slowly and stand in open air for one minute.', targets: ['stress', 'low', 'anxiety'] },
+  { id: 'nadi-5', minutes: 5, title: 'Nadi Shodhana', detail: 'Alternate nostril breathing to settle racing thoughts.', targets: ['anxiety', 'stress'] },
+  { id: 'chai-walk-5', minutes: 5, title: 'Chai Walk', detail: 'Short no-phone walk, terrace or corridor, with mindful sips.', targets: ['low', 'stress'] },
+  { id: 'body-scan-10', minutes: 10, title: 'Yoga Nidra Lite', detail: 'Guided body scan from toes to forehead in a quiet space.', targets: ['stress', 'anxiety', 'low'] },
+  { id: 'surya-10', minutes: 10, title: 'Surya Flow', detail: '5 rounds of Surya Namaskar at a gentle pace.', targets: ['low', 'calm'] },
+];
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [authError, setAuthError] = useState(null);
@@ -108,10 +127,22 @@ export default function App() {
   const [activeGame, setActiveGame] = useState(null);
   const [gameStats, setGameStats] = useState({ dissolveScore: 0 });
   const [weeklyAlert, setWeeklyAlert] = useState(null);
+  const [interventionProgress, setInterventionProgress] = useState({ beforeMood: null, afterMood: null, lastDelta: null });
   const lastHapticAt = useRef(0);
+  const audioContextRef = useRef(null);
 
   const constraintsRef = useRef(null);
   const activeTheme = MOOD_THEMES[currentMood];
+  const resilienceBoost = Math.min((gameStats.dissolveScore || 0) / 150, 0.18);
+  const blobProfile = useMemo(() => {
+    const base = BLOB_PERSONALITY[currentMood] || BLOB_PERSONALITY.calm;
+    return {
+      ...base,
+      dragElastic: Math.min(base.dragElastic + resilienceBoost, 0.82),
+      stiffness: Math.max(base.stiffness - Math.round(resilienceBoost * 160), 200),
+      damping: Math.max(base.damping - Math.round(resilienceBoost * 10), 16),
+    };
+  }, [currentMood, resilienceBoost]);
 
   const triggerHaptic = useCallback((pattern = [10], minIntervalMs = 60) => {
     if (typeof window === 'undefined') return;
@@ -126,11 +157,35 @@ export default function App() {
     } catch (_) {}
   }, []);
 
+  const playTextureTone = useCallback((isRelease = false) => {
+    if (typeof window === 'undefined') return;
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    try {
+      if (!audioContextRef.current) audioContextRef.current = new AudioCtx();
+      const ctx = audioContextRef.current;
+      if (ctx.state === 'suspended') ctx.resume();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const baseTone = blobProfile.tone;
+      osc.type = isRelease ? 'triangle' : 'sine';
+      osc.frequency.value = isRelease ? baseTone + 80 : baseTone;
+      gain.gain.value = 0.0001;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      const now = ctx.currentTime;
+      gain.gain.exponentialRampToValueAtTime(0.025, now + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+      osc.start(now);
+      osc.stop(now + 0.14);
+    } catch (_) {}
+  }, [blobProfile]);
+
   // Motion Values
   const x = useMotionValue(0);
   const y = useMotionValue(0);
-  const springX = useSpring(x, { stiffness: 300, damping: 30 });
-  const springY = useSpring(y, { stiffness: 300, damping: 30 });
+  const springX = useSpring(x, { stiffness: blobProfile.stiffness, damping: blobProfile.damping });
+  const springY = useSpring(y, { stiffness: blobProfile.stiffness, damping: blobProfile.damping });
   const rotateX = useTransform(springY, [-100, 100], [15, -15]);
   const rotateY = useTransform(springX, [-100, 100], [-15, 15]);
 
@@ -151,6 +206,27 @@ export default function App() {
     const probWinner = Object.keys(freq).find(k => freq[k] >= 3);
     return probWinner || Object.keys(freq).reduce((a, b) => freq[a] > freq[b] ? a : b);
   }, []);
+
+  const getDayWeather = useCallback((dayData) => {
+    if (!dayData) return null;
+    const moodEntries = TIME_SLOTS.map(slot => dayData[slot.id]).filter(Boolean);
+    if (!moodEntries.length) return null;
+    const total = moodEntries.length;
+    const stressCount = moodEntries.filter(m => m === 'stress').length;
+    const anxietyCount = moodEntries.filter(m => m === 'anxiety').length;
+    const calmLightCount = moodEntries.filter(m => m === 'joy' || m === 'calm').length;
+    return {
+      cloudCover: Math.round((stressCount / total) * 100),
+      windLevel: Math.round((anxietyCount / total) * 100),
+      lightLevel: Math.round((calmLightCount / total) * 100),
+    };
+  }, []);
+
+  const dayKeysSorted = useMemo(() => (
+    Object.keys(calendarData)
+      .filter(key => /^\d{4}-\d{2}-\d{2}$/.test(key))
+      .sort()
+  ), [calendarData]);
 
   // Sync & Auth Logic
   useEffect(() => {
@@ -252,10 +328,126 @@ export default function App() {
     for (let i = 1; i <= lastDay.getDate(); i++) {
       const d = new Date(now.getFullYear(), now.getMonth(), i);
       const key = getDateKey(d);
-      days.push({ day: i, key, mood: getDominantMoodOfDay(calendarData[key]), isToday: key === getDateKey(new Date()) });
+      const dayData = calendarData[key];
+      days.push({
+        day: i,
+        key,
+        mood: getDominantMoodOfDay(dayData),
+        weather: getDayWeather(dayData),
+        isToday: key === getDateKey(new Date())
+      });
     }
     return days;
-  }, [calendarData, getDateKey, getDominantMoodOfDay]);
+  }, [calendarData, getDateKey, getDominantMoodOfDay, getDayWeather]);
+
+  const recoveryMetrics = useMemo(() => {
+    const highStressMoods = new Set(['stress', 'anxiety']);
+    const stableMoods = new Set(['calm', 'joy']);
+    let currentStreak = 0;
+    let bestStreak = 0;
+    let totalRecoveries = 0;
+    let weeklyRecoveries = 0;
+    const last7 = new Set(dayKeysSorted.slice(-7));
+
+    dayKeysSorted.forEach((key) => {
+      const dayData = calendarData[key];
+      const ordered = TIME_SLOTS.map(slot => dayData?.[slot.id]).filter(Boolean);
+      const hasRecovery = ordered.some((mood, idx) =>
+        highStressMoods.has(mood) && ordered.slice(idx + 1).some(nextMood => stableMoods.has(nextMood))
+      );
+
+      if (hasRecovery) {
+        totalRecoveries += 1;
+        currentStreak += 1;
+        bestStreak = Math.max(bestStreak, currentStreak);
+        if (last7.has(key)) weeklyRecoveries += 1;
+      } else {
+        currentStreak = 0;
+      }
+    });
+
+    return { currentStreak, bestStreak, totalRecoveries, weeklyRecoveries };
+  }, [calendarData, dayKeysSorted]);
+
+  const moodForecast = useMemo(() => {
+    const recentKeys = dayKeysSorted.slice(-30);
+    const slots = TIME_SLOTS.map((slot) => {
+      const freq = {};
+      let total = 0;
+      recentKeys.forEach((key) => {
+        const mood = calendarData[key]?.[slot.id];
+        if (!mood) return;
+        freq[mood] = (freq[mood] || 0) + 1;
+        total += 1;
+      });
+      if (!total) {
+        return { ...slot, mood: null, confidence: 0, message: 'Need more entries' };
+      }
+      const [topMood, topCount] = Object.entries(freq).sort((a, b) => b[1] - a[1])[0];
+      const confidence = Math.round((topCount / total) * 100);
+      const caution = ['stress', 'anxiety'].includes(topMood) ? 'Watch this slot' : 'Stable slot';
+      return { ...slot, mood: topMood, confidence, message: caution };
+    });
+
+    const focusSlot = [...slots].sort((a, b) => b.confidence - a.confidence)[0];
+    return {
+      slots,
+      focusSlot,
+      tomorrowLabel: new Date(Date.now() + 86400000).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })
+    };
+  }, [calendarData, dayKeysSorted]);
+
+  const interventionPlan = useMemo(() => {
+    const last7Keys = dayKeysSorted.slice(-7);
+    const last7Moods = last7Keys.flatMap((key) => TIME_SLOTS.map(slot => calendarData[key]?.[slot.id]).filter(Boolean));
+    const stressCount = last7Moods.filter(mood => mood === 'stress').length;
+    const anxietyCount = last7Moods.filter(mood => mood === 'anxiety').length;
+    const vulnerabilityLevel = stressCount + anxietyCount >= 8 ? 'high' : stressCount + anxietyCount >= 4 ? 'moderate' : 'steady';
+    const primaryTarget = stressCount >= anxietyCount ? 'stress' : 'anxiety';
+    const targetMood = ['stress', 'anxiety', 'low'].includes(currentMood) ? currentMood : primaryTarget;
+
+    const picks = [2, 5, 10].map((minutes) => {
+      const exact = INDIA_INTERVENTIONS.find((item) => item.minutes === minutes && item.targets.includes(targetMood));
+      if (exact) return exact;
+      return INDIA_INTERVENTIONS.find((item) => item.minutes === minutes) || null;
+    }).filter(Boolean);
+
+    const label = vulnerabilityLevel === 'high'
+      ? 'Vulnerable trend spotted'
+      : vulnerabilityLevel === 'moderate'
+        ? 'Mild stress drift'
+        : 'Stable rhythm';
+
+    return { targetMood, vulnerabilityLevel, label, picks };
+  }, [calendarData, currentMood, dayKeysSorted]);
+
+  const monthlyWeather = useMemo(() => {
+    const weatherDays = calendarDays.filter(day => day.weather);
+    if (!weatherDays.length) return { cloudCover: 0, windLevel: 0, lightLevel: 0 };
+    const sum = weatherDays.reduce((acc, day) => {
+      acc.cloudCover += day.weather.cloudCover;
+      acc.windLevel += day.weather.windLevel;
+      acc.lightLevel += day.weather.lightLevel;
+      return acc;
+    }, { cloudCover: 0, windLevel: 0, lightLevel: 0 });
+    return {
+      cloudCover: Math.round(sum.cloudCover / weatherDays.length),
+      windLevel: Math.round(sum.windLevel / weatherDays.length),
+      lightLevel: Math.round(sum.lightLevel / weatherDays.length),
+    };
+  }, [calendarDays]);
+
+  const markInterventionBefore = useCallback(() => {
+    setInterventionProgress({ beforeMood: currentMood, afterMood: null, lastDelta: null });
+  }, [currentMood]);
+
+  const markInterventionAfter = useCallback(() => {
+    setInterventionProgress((prev) => {
+      if (!prev.beforeMood) return prev;
+      const delta = (MOOD_SCORE[currentMood] || 0) - (MOOD_SCORE[prev.beforeMood] || 0);
+      return { beforeMood: prev.beforeMood, afterMood: currentMood, lastDelta: delta };
+    });
+  }, [currentMood]);
 
   if (!config) {
     return (
@@ -339,16 +531,18 @@ export default function App() {
                 <div className="text-center z-20">
                   <h2 className="text-lg md:text-2xl font-bold uppercase tracking-widest opacity-80" style={{ fontFamily: "'Cinzel Decorative', serif" }}>Fluid Release</h2>
                   <p className="text-xs md:text-sm italic opacity-60">Physically release tension. Tap palette to log vibe.</p>
+                  <p className="text-[10px] md:text-xs mt-2 uppercase tracking-widest text-slate-500">{blobProfile.label} • tuned for your current rhythm</p>
                 </div>
                 <div className="relative flex-1 flex items-center justify-center w-full min-h-[200px] pointer-events-none">
                   <motion.div
                     drag
                     dragConstraints={constraintsRef}
-                    dragElastic={0.6}
+                    dragElastic={blobProfile.dragElastic}
                     style={{ x, y, rotateX, rotateY }}
-                    onPointerDown={() => triggerHaptic([8], 0)}
-                    onDragStart={() => triggerHaptic([10], 40)}
-                    onDragEnd={() => { x.set(0); y.set(0); triggerHaptic([16]); }}
+                    onPointerDown={() => { triggerHaptic([8], 0); playTextureTone(false); }}
+                    onDragStart={() => { triggerHaptic([10], 40); playTextureTone(false); }}
+                    onDragEnd={() => { x.set(0); y.set(0); triggerHaptic([16]); playTextureTone(true); }}
+                    whileTap={{ scale: 0.97 }}
                     className={`pointer-events-auto z-30 w-36 h-36 md:w-56 md:h-56 shadow-2xl backdrop-blur-3xl transition-colors duration-1000 ${activeTheme.glass} ${activeTheme.glow} border border-white/60 flex items-center justify-center cursor-grab active:cursor-grabbing rounded-full p-8`}
                   >
                     <div className={`${activeTheme.accent} w-full h-full`}>{React.cloneElement(activeTheme.icon, { size: '100%' })}</div>
@@ -391,6 +585,42 @@ export default function App() {
                   })}
                 </div>
               </div>
+
+              <div className="relative z-[60] backdrop-blur-xl bg-white/45 p-6 md:p-8 rounded-[2.5rem] md:rounded-[3rem] border border-white/60 shadow-lg flex flex-col gap-5 text-slate-800">
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                  <h3 className="text-md md:text-lg font-bold uppercase tracking-widest" style={{ fontFamily: "'Cinzel Decorative', serif" }}>Intervention Recommender</h3>
+                  <span className={`text-[9px] uppercase tracking-widest font-black px-3 py-1 rounded-full ${interventionPlan.vulnerabilityLevel === 'high' ? 'bg-rose-500/20 text-rose-700' : interventionPlan.vulnerabilityLevel === 'moderate' ? 'bg-amber-500/20 text-amber-700' : 'bg-emerald-500/20 text-emerald-700'}`}>
+                    {interventionPlan.label}
+                  </span>
+                </div>
+
+                <p className="text-xs md:text-sm text-slate-600 italic">India-friendly routines for commute, office breaks, or home calm windows.</p>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {interventionPlan.picks.map((item) => (
+                    <div key={item.id} className="p-4 rounded-[1.4rem] border border-white/80 bg-white/70 shadow-sm">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">{item.minutes} Minute Reset</p>
+                      <h4 className="text-sm font-bold mt-1">{item.title}</h4>
+                      <p className="text-xs text-slate-600 mt-1 leading-relaxed">{item.detail}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex flex-col md:flex-row gap-3">
+                  <button onClick={markInterventionBefore} className="flex-1 py-3 rounded-full border border-slate-300 bg-white/80 text-[10px] font-black uppercase tracking-widest hover:bg-white transition-colors">
+                    Mark Before ({currentMood})
+                  </button>
+                  <button onClick={markInterventionAfter} disabled={!interventionProgress.beforeMood} className="flex-1 py-3 rounded-full border border-slate-300 bg-slate-800 text-white text-[10px] font-black uppercase tracking-widest disabled:opacity-40 hover:bg-slate-700 transition-colors">
+                    Mark After ({currentMood})
+                  </button>
+                </div>
+
+                {interventionProgress.lastDelta !== null && (
+                  <p className={`text-xs font-bold uppercase tracking-widest ${interventionProgress.lastDelta > 0 ? 'text-emerald-700' : interventionProgress.lastDelta < 0 ? 'text-rose-700' : 'text-slate-600'}`}>
+                    {interventionProgress.lastDelta > 0 ? `Recovery improved by ${interventionProgress.lastDelta} point(s)` : interventionProgress.lastDelta < 0 ? 'Stress increased. Try a longer reset window.' : 'Mood stayed steady after intervention.'}
+                  </p>
+                )}
+              </div>
             </motion.div>
           ) : (
             /* --- RESTORED POETIC INSIGHTS DASHBOARD --- */
@@ -424,6 +654,49 @@ export default function App() {
                     </button>
                   </div>
                 )}
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="bg-white/80 backdrop-blur-xl p-6 rounded-[2rem] border border-white shadow-lg text-slate-800">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-sm md:text-base font-black uppercase tracking-widest" style={{ fontFamily: "'Cinzel Decorative', serif" }}>Mood Forecast Engine</h3>
+                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Tomorrow • {moodForecast.tomorrowLabel}</span>
+                  </div>
+                  <div className="flex flex-col gap-4">
+                    {moodForecast.slots.map((slot) => (
+                      <div key={slot.id} className="space-y-1">
+                        <div className="flex items-center justify-between text-[11px] font-black uppercase tracking-wider">
+                          <span>{slot.period}</span>
+                          <span className="text-slate-500">{slot.mood ? `${slot.mood} • ${slot.confidence}%` : 'No data'}</span>
+                        </div>
+                        <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
+                          <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-amber-500 to-rose-500" style={{ width: `${slot.confidence}%` }} />
+                        </div>
+                        <p className="text-[10px] uppercase tracking-wider text-slate-500">{slot.message}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-xs text-slate-600 italic mt-4">Built for Indian day rhythms: commute peaks, late-evening decompression, and weekend variance.</p>
+                </div>
+
+                <div className="bg-slate-900 text-white p-6 rounded-[2rem] border border-white/10 shadow-lg">
+                  <h3 className="text-sm md:text-base font-black uppercase tracking-widest mb-5" style={{ fontFamily: "'Cinzel Decorative', serif" }}>Streaks That Reward Recovery</h3>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="p-4 rounded-2xl bg-white/5 border border-white/10 text-center">
+                      <p className="text-2xl font-black text-emerald-300">{recoveryMetrics.currentStreak}</p>
+                      <p className="text-[9px] uppercase tracking-widest text-slate-300">Current Bounce-back</p>
+                    </div>
+                    <div className="p-4 rounded-2xl bg-white/5 border border-white/10 text-center">
+                      <p className="text-2xl font-black text-amber-300">{recoveryMetrics.weeklyRecoveries}</p>
+                      <p className="text-[9px] uppercase tracking-widest text-slate-300">This Week</p>
+                    </div>
+                    <div className="p-4 rounded-2xl bg-white/5 border border-white/10 text-center">
+                      <p className="text-2xl font-black text-sky-300">{recoveryMetrics.bestStreak}</p>
+                      <p className="text-[9px] uppercase tracking-widest text-slate-300">Best Streak</p>
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-300 mt-4 italic">Rewarding recovery is more sustainable than chasing a perfect mood score every day.</p>
+                </div>
               </div>
             </motion.div>
           )}
@@ -472,10 +745,36 @@ export default function App() {
                         >
                           {item.mood && <div className={`${MOOD_THEMES[item.mood].accent} w-5 h-5 md:w-7 md:h-7 mb-1`}>{MOOD_THEMES[item.mood].icon}</div>}
                           <span className={`text-[9px] md:text-[11px] font-black ${item.mood ? 'text-slate-800' : 'text-slate-300'}`}>{item.day}</span>
+                          {item.weather && (
+                            <div className="absolute bottom-1 left-1 right-1 flex gap-1 justify-center">
+                              <div className="h-1 rounded-full bg-rose-400/70" style={{ width: `${Math.max(item.weather.cloudCover / 4, 10)}%` }} />
+                              <div className="h-1 rounded-full bg-amber-400/70" style={{ width: `${Math.max(item.weather.windLevel / 4, 10)}%` }} />
+                              <div className="h-1 rounded-full bg-emerald-400/70" style={{ width: `${Math.max(item.weather.lightLevel / 4, 10)}%` }} />
+                            </div>
+                          )}
                         </div>
                       ) : <div className="w-full aspect-square" />}
                     </div>
                   ))}
+                </div>
+
+                <div className="mt-8 p-5 rounded-[2rem] border border-slate-200 bg-slate-50/90">
+                  <h4 className="text-xs md:text-sm font-black uppercase tracking-widest text-slate-700 mb-3" style={{ fontFamily: "'Cinzel Decorative', serif" }}>Emotional Weather Map</h4>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="p-4 rounded-xl bg-white border border-slate-200">
+                      <p className="text-[10px] uppercase font-black tracking-wider text-slate-500">Cloud Cover (Stress)</p>
+                      <p className="text-xl font-black text-rose-600 mt-1">{monthlyWeather.cloudCover}%</p>
+                    </div>
+                    <div className="p-4 rounded-xl bg-white border border-slate-200">
+                      <p className="text-[10px] uppercase font-black tracking-wider text-slate-500">Wind Flow (Anxiety)</p>
+                      <p className="text-xl font-black text-amber-600 mt-1">{monthlyWeather.windLevel}%</p>
+                    </div>
+                    <div className="p-4 rounded-xl bg-white border border-slate-200">
+                      <p className="text-[10px] uppercase font-black tracking-wider text-slate-500">Light Index (Calm/Joy)</p>
+                      <p className="text-xl font-black text-emerald-600 mt-1">{monthlyWeather.lightLevel}%</p>
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-500 italic mt-3">Scan the month like a monsoon map: red means emotional overcast, green means recovery sunlight.</p>
                 </div>
               </div>
               <p className="text-center text-[10px] font-black text-slate-400 uppercase tracking-[0.4em]">Calculated daily at 01:00 AM • Neural Sync Active</p>
