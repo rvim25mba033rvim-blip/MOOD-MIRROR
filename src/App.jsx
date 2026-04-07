@@ -1204,13 +1204,6 @@ export default function App() {
                 </div>
               </div>
               <p className="text-center text-[10px] font-black text-slate-400 uppercase tracking-[0.4em]">Calculated daily at 01:00 AM • Neural Sync Active</p>
-
-              <button
-                onClick={() => setIsCalendarOpen(false)}
-                className={OVERLAY_BACK_BUTTON_CLASS}
-              >
-                {OVERLAY_BACK_LABEL}
-              </button>
             </div>
           </motion.div>
         )}
