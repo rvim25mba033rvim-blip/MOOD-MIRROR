@@ -13,21 +13,50 @@ import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, 
 import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, query, limit, orderBy } from 'firebase/firestore';
 
 // --- ROBUST CONFIGURATION LOGIC ---
-const getEnvConfig = () => {
-  if (typeof __firebase_config !== 'undefined' && __firebase_config) {
-    return { firebase: JSON.parse(__firebase_config), gemini: "" };
+const parseFirebaseConfig = (rawValue) => {
+  if (!rawValue) return null;
+  if (typeof rawValue === 'object') return rawValue;
+  if (typeof rawValue !== 'string') return null;
+  try {
+    return JSON.parse(rawValue);
+  } catch (_) {
+    return null;
   }
-  
+};
+
+const buildFirebaseConfigFromFields = (metaEnv) => {
+  if (!metaEnv?.VITE_FIREBASE_API_KEY || !metaEnv?.VITE_FIREBASE_PROJECT_ID) return null;
+  return {
+    apiKey: metaEnv.VITE_FIREBASE_API_KEY,
+    authDomain: metaEnv.VITE_FIREBASE_AUTH_DOMAIN,
+    projectId: metaEnv.VITE_FIREBASE_PROJECT_ID,
+    storageBucket: metaEnv.VITE_FIREBASE_STORAGE_BUCKET,
+    messagingSenderId: metaEnv.VITE_FIREBASE_MESSAGING_SENDER_ID,
+    appId: metaEnv.VITE_FIREBASE_APP_ID,
+    measurementId: metaEnv.VITE_FIREBASE_MEASUREMENT_ID,
+  };
+};
+
+const getEnvConfig = () => {
+  const globalFirebaseConfig =
+    typeof __firebase_config !== 'undefined' ? parseFirebaseConfig(__firebase_config) : null;
+  if (globalFirebaseConfig?.apiKey) {
+    return { firebase: globalFirebaseConfig, gemini: "" };
+  }
+
   try {
     // @ts-ignore
-    const metaEnv = import.meta.env; 
-    if (metaEnv && metaEnv.VITE_FIREBASE_CONFIG) {
+    const metaEnv = import.meta.env;
+    if (metaEnv) {
+      const jsonConfig = parseFirebaseConfig(metaEnv.VITE_FIREBASE_CONFIG);
+      const fieldConfig = buildFirebaseConfigFromFields(metaEnv);
+      const firebaseConfig = jsonConfig?.apiKey ? jsonConfig : fieldConfig;
       return {
-        firebase: JSON.parse(metaEnv.VITE_FIREBASE_CONFIG),
+        firebase: firebaseConfig,
         gemini: metaEnv.VITE_GEMINI_API_KEY || ""
       };
     }
-  } catch (e) {}
+  } catch (_) {}
 
   return { firebase: null, gemini: "" };
 };
@@ -79,9 +108,23 @@ export default function App() {
   const [activeGame, setActiveGame] = useState(null);
   const [gameStats, setGameStats] = useState({ dissolveScore: 0 });
   const [weeklyAlert, setWeeklyAlert] = useState(null);
+  const lastHapticAt = useRef(0);
 
   const constraintsRef = useRef(null);
   const activeTheme = MOOD_THEMES[currentMood];
+
+  const triggerHaptic = useCallback((pattern = [10], minIntervalMs = 60) => {
+    if (typeof window === 'undefined') return;
+    if (!('vibrate' in navigator)) return;
+
+    const now = Date.now();
+    if (now - lastHapticAt.current < minIntervalMs) return;
+    lastHapticAt.current = now;
+
+    try {
+      navigator.vibrate(pattern);
+    } catch (_) {}
+  }, []);
 
   // Motion Values
   const x = useMotionValue(0);
@@ -220,7 +263,7 @@ export default function App() {
         <div className="max-w-md backdrop-blur-xl bg-white/5 p-10 rounded-[3rem] border border-white/10 shadow-2xl flex flex-col items-center gap-6">
           <AlertCircle className="text-rose-500 w-16 h-16" />
           <h1 className="text-2xl font-black uppercase tracking-widest" style={{ fontFamily: "'Cinzel Decorative', serif" }}>Mirror Missing</h1>
-          <p className="text-slate-400 text-sm italic">Add VITE_FIREBASE_CONFIG to Vercel Settings.</p>
+          <p className="text-slate-400 text-sm italic">Add VITE_FIREBASE_CONFIG or VITE_FIREBASE_* env keys in Vercel and .env.local.</p>
         </div>
       </div>
     );
@@ -298,7 +341,16 @@ export default function App() {
                   <p className="text-xs md:text-sm italic opacity-60">Physically release tension. Tap palette to log vibe.</p>
                 </div>
                 <div className="relative flex-1 flex items-center justify-center w-full min-h-[200px] pointer-events-none">
-                  <motion.div drag dragConstraints={constraintsRef} dragElastic={0.6} style={{ x, y, rotateX, rotateY }} onDragEnd={() => { x.set(0); y.set(0); }} className={`pointer-events-auto z-30 w-36 h-36 md:w-56 md:h-56 shadow-2xl backdrop-blur-3xl transition-colors duration-1000 ${activeTheme.glass} ${activeTheme.glow} border border-white/60 flex items-center justify-center cursor-grab active:cursor-grabbing rounded-full p-8`}>
+                  <motion.div
+                    drag
+                    dragConstraints={constraintsRef}
+                    dragElastic={0.6}
+                    style={{ x, y, rotateX, rotateY }}
+                    onPointerDown={() => triggerHaptic([8], 0)}
+                    onDragStart={() => triggerHaptic([10], 40)}
+                    onDragEnd={() => { x.set(0); y.set(0); triggerHaptic([16]); }}
+                    className={`pointer-events-auto z-30 w-36 h-36 md:w-56 md:h-56 shadow-2xl backdrop-blur-3xl transition-colors duration-1000 ${activeTheme.glass} ${activeTheme.glow} border border-white/60 flex items-center justify-center cursor-grab active:cursor-grabbing rounded-full p-8`}
+                  >
                     <div className={`${activeTheme.accent} w-full h-full`}>{React.cloneElement(activeTheme.icon, { size: '100%' })}</div>
                   </motion.div>
                 </div>
