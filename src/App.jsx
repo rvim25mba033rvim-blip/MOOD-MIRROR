@@ -3,7 +3,7 @@ import { motion, AnimatePresence, useMotionValue, useSpring, useTransform } from
 import { 
   CloudSun, TrendingUp, Mic, Info, BrainCircuit, Leaf, Wind, Sparkles, 
   Calendar as CalendarIcon, ChevronLeft, ChevronRight, Clock, Moon, Star, Share2, LogOut, Cloud, Loader2, AlertCircle,
-  Gamepad2, Trophy, X, Zap, Target, Heart, Wand2, HelpCircle, Bell
+  Gamepad2, Trophy, X, Zap, Target, Heart, Wand2, HelpCircle, Bell, MessageCircle, Send, ShieldAlert
 } from 'lucide-react';
 import { SpeedInsights } from '@vercel/speed-insights/react';
 
@@ -82,17 +82,35 @@ const getEnvConfig = () => {
       const firebaseConfig = jsonConfig?.apiKey ? jsonConfig : fieldConfig;
       return {
         firebase: firebaseConfig,
-        gemini: metaEnv.VITE_GEMINI_API_KEY || ""
+        gemini: metaEnv.VITE_GEMINI_API_KEY || "",
+        chat: {
+          model: metaEnv.VITE_AI_CHAT_MODEL || "gpt-4o-mini",
+          systemPrompt: metaEnv.VITE_AI_CHAT_SYSTEM_PROMPT || ""
+        }
       };
     }
   } catch (_) {}
 
-  return { firebase: null, gemini: "" };
+  return {
+    firebase: null,
+    gemini: "",
+    chat: { model: "gpt-4o-mini", systemPrompt: "" }
+  };
 };
 
-const { firebase: config, gemini: geminiApiKey } = getEnvConfig();
+const { firebase: config, gemini: geminiApiKey, chat: chatEnvConfig } = getEnvConfig();
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'mood-mirror-prod';
 const apiKey = ""; 
+const SUPPORT_FALLBACK_SYSTEM_PROMPT = `You are Mood Mirror Companion, a warm AI coach that uses CBT and DBT skills.
+- Keep responses practical, calm, and short (4-9 lines).
+- Always validate feelings, then guide with one concrete exercise.
+- Prefer: thought reframing, grounding, opposite action, distress tolerance, urge surfing, wise-mind prompts.
+- Never claim to be a therapist or diagnose conditions.
+- If user mentions self-harm, suicide, violence, or immediate danger, advise urgent local emergency help and trusted human support now.
+- End most replies with one reflective question.
+`;
+
+const SUPPORT_GREETING = "Hi, I am your CBT/DBT support companion. Tell me what is hardest right now, and we will break it into one manageable next step.";
 
 // Initialize services safely
 let auth = null, db = null;
@@ -164,6 +182,7 @@ export default function App() {
   // FEATURES STATE
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
   const [isGamesOpen, setIsGamesOpen] = useState(false);
+  const [isSupportOpen, setIsSupportOpen] = useState(false);
   const [activeGame, setActiveGame] = useState(null);
   const [gameStats, setGameStats] = useState({ dissolveScore: 0 });
   const [weeklyAlert, setWeeklyAlert] = useState(null);
@@ -184,9 +203,14 @@ export default function App() {
   const [ritualTimeLeft, setRitualTimeLeft] = useState(30);
   const [ritualPhase, setRitualPhase] = useState('Inhale');
   const [isDraggingBlob, setIsDraggingBlob] = useState(false);
+  const [supportMessages, setSupportMessages] = useState([{ id: 'welcome', role: 'assistant', content: SUPPORT_GREETING }]);
+  const [supportInput, setSupportInput] = useState('');
+  const [supportError, setSupportError] = useState(null);
+  const [isSupportLoading, setIsSupportLoading] = useState(false);
   const lastHapticAt = useRef(0);
   const lastTrailAt = useRef(0);
   const audioContextRef = useRef(null);
+  const supportScrollRef = useRef(null);
 
   const blobAreaRef = useRef(null);
   const activeTheme = MOOD_THEMES[currentMood];
@@ -581,6 +605,7 @@ export default function App() {
       if (event.key !== 'Escape') return;
       if (isAuthModalOpen) setIsAuthModalOpen(false);
       if (isCalendarOpen) setIsCalendarOpen(false);
+      if (isSupportOpen) setIsSupportOpen(false);
       if (isGamesOpen) {
         setIsGamesOpen(false);
         setActiveGame(null);
@@ -588,7 +613,12 @@ export default function App() {
     };
     window.addEventListener('keydown', onEscClose);
     return () => window.removeEventListener('keydown', onEscClose);
-  }, [isAuthModalOpen, isCalendarOpen, isGamesOpen]);
+  }, [isAuthModalOpen, isCalendarOpen, isSupportOpen, isGamesOpen]);
+
+  useEffect(() => {
+    if (!supportScrollRef.current) return;
+    supportScrollRef.current.scrollTop = supportScrollRef.current.scrollHeight;
+  }, [supportMessages, isSupportLoading, isSupportOpen]);
 
   useEffect(() => {
     if (!isRitualActive) return;
@@ -846,6 +876,65 @@ export default function App() {
   };
 
   const currentSummary = calendarData[getDateKey(selectedDate)]?.ai_summary;
+
+  const extractSupportText = (payload) => {
+    const fromOpenAI = payload?.choices?.[0]?.message?.content;
+    if (typeof fromOpenAI === 'string' && fromOpenAI.trim()) return fromOpenAI.trim();
+
+    const fromGemini = payload?.candidates?.[0]?.content?.parts?.map((part) => part?.text || '').join('\n').trim();
+    if (fromGemini) return fromGemini;
+
+    if (typeof payload?.output_text === 'string' && payload.output_text.trim()) return payload.output_text.trim();
+    return '';
+  };
+
+  const handleSupportSend = useCallback(async () => {
+    const trimmed = supportInput.trim();
+    if (!trimmed || isSupportLoading) return;
+
+    const userMessage = { id: `u-${Date.now()}`, role: 'user', content: trimmed };
+    const nextMessages = [...supportMessages, userMessage];
+    setSupportMessages(nextMessages);
+    setSupportInput('');
+    setSupportError(null);
+
+    setIsSupportLoading(true);
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: chatEnvConfig.model || 'gpt-4o-mini',
+          systemPrompt: chatEnvConfig.systemPrompt || SUPPORT_FALLBACK_SYSTEM_PROMPT,
+          temperature: 0.7,
+          messages: nextMessages.slice(-12).map((message) => ({ role: message.role, content: message.content }))
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `Request failed: ${response.status}`);
+      }
+
+      const payload = await response.json();
+      const assistantText = extractSupportText(payload);
+      if (!assistantText) throw new Error('No assistant text returned by API.');
+
+      setSupportMessages((prev) => [...prev, { id: `a-${Date.now()}`, role: 'assistant', content: assistantText }]);
+    } catch (error) {
+      setSupportError(error.message || 'Chat request failed.');
+      setSupportMessages((prev) => [
+        ...prev,
+        {
+          id: `a-${Date.now()}`,
+          role: 'assistant',
+          content: 'I hit a network issue. Try again in a moment. If you are in immediate danger, please contact local emergency services right now.'
+        }
+      ]);
+    } finally {
+      setIsSupportLoading(false);
+    }
+  }, [supportInput, isSupportLoading, supportMessages, chatEnvConfig.model, chatEnvConfig.systemPrompt]);
 
   return (
     <div className={`min-h-screen w-full transition-colors duration-1000 bg-gradient-to-br ${activeTheme.bg} p-4 md:p-8 flex flex-col items-center overflow-x-hidden font-sans`}>
@@ -1256,6 +1345,98 @@ export default function App() {
           <div className="absolute -top-1 -right-1 w-5 h-5 bg-emerald-400 rounded-full border-2 border-white animate-pulse" />
         </button>
       </div>
+
+      {/* AI SUPPORT CHAT TRIGGER */}
+      <div className="fixed bottom-24 right-6 z-[100]">
+        <button
+          onClick={() => setIsSupportOpen(true)}
+          className="p-4 rounded-full bg-white text-slate-900 border border-slate-200 shadow-2xl hover:scale-105 active:scale-95 transition-all group"
+          aria-label="Open AI support chat"
+        >
+          <MessageCircle size={24} className="group-hover:-rotate-6 transition-transform" />
+        </button>
+      </div>
+
+      {/* AI SUPPORT CHAT OVERLAY */}
+      <AnimatePresence>
+        {isSupportOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setIsSupportOpen(false)}
+            className="fixed inset-0 z-[260] bg-slate-900/70 backdrop-blur-md p-3 md:p-6 flex items-center justify-center"
+          >
+            <motion.div
+              initial={{ opacity: 0, y: 20, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 14, scale: 0.98 }}
+              transition={{ duration: 0.2 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-2xl h-[78vh] rounded-[2rem] border border-white/20 bg-white/95 shadow-2xl overflow-hidden flex flex-col"
+            >
+              <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm md:text-base font-black uppercase tracking-widest text-slate-800" style={{ fontFamily: "'Cinzel Decorative', serif" }}>AI Support Chat</h3>
+                  <p className="text-[11px] text-slate-500 italic">CBT/DBT-style coaching. Not a crisis or emergency service.</p>
+                </div>
+                <button onClick={() => setIsSupportOpen(false)} className="p-2 rounded-full bg-slate-100 hover:bg-slate-200 transition-colors" aria-label="Close support chat"><X size={18} /></button>
+              </div>
+
+              <div className="px-5 py-3 bg-amber-50 border-b border-amber-200 flex items-start gap-2 text-amber-800">
+                <ShieldAlert size={16} className="mt-0.5 shrink-0" />
+                <p className="text-[11px] leading-relaxed">If you are in immediate danger or considering self-harm, contact local emergency services and a trusted person now.</p>
+              </div>
+
+              <div ref={supportScrollRef} className="flex-1 overflow-y-auto p-4 md:p-5 bg-slate-50/70">
+                <div className="flex flex-col gap-3">
+                  {supportMessages.map((message) => (
+                    <div
+                      key={message.id}
+                      className={`max-w-[88%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${message.role === 'user' ? 'self-end bg-slate-900 text-white' : 'self-start bg-white border border-slate-200 text-slate-700'}`}
+                    >
+                      {message.content}
+                    </div>
+                  ))}
+                  {isSupportLoading && (
+                    <div className="self-start bg-white border border-slate-200 text-slate-500 rounded-2xl px-4 py-3 text-sm flex items-center gap-2">
+                      <Loader2 size={14} className="animate-spin" />
+                      Thinking through your next step...
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="p-4 border-t border-slate-200 bg-white">
+                <div className="flex items-center gap-2">
+                  <input
+                    value={supportInput}
+                    onChange={(event) => setSupportInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && !event.shiftKey) {
+                        event.preventDefault();
+                        handleSupportSend();
+                      }
+                    }}
+                    type="text"
+                    placeholder="Share what you are feeling right now..."
+                    className="flex-1 px-4 py-3 rounded-full border border-slate-300 bg-white text-sm outline-none focus:ring-2 focus:ring-slate-300"
+                  />
+                  <button
+                    onClick={handleSupportSend}
+                    disabled={isSupportLoading || !supportInput.trim()}
+                    className="px-4 py-3 rounded-full bg-slate-900 text-white disabled:opacity-40"
+                    aria-label="Send support message"
+                  >
+                    <Send size={16} />
+                  </button>
+                </div>
+                {supportError && <p className="text-[11px] text-rose-700 mt-2">{supportError}</p>}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* CALENDAR OVERLAY */}
       <AnimatePresence>
